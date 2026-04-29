@@ -128,6 +128,8 @@ cd contract && cargo test
 - `claim_past_total_returns_error`
 - `cancel_then_claim_blocked`
 - `non_merchant_cannot_claim`
+<img width="431" height="136" alt="image" src="https://github.com/user-attachments/assets/5c9d22bc-5872-43a7-b0c5-e617b3744371" />
+
 
 CI runs them on every push (`.github/workflows/ci.yml`).
 
@@ -156,9 +158,8 @@ Frontend (`lib/errors.ts`):
 
 | | |
 |---|---|
-| Create flow | ![Create](docs/screenshots/create.png) |
-| Claim ready | ![Claim](docs/screenshots/claim.png) |
-| Live event feed | ![Events](docs/screenshots/events.png) |
-| Mobile view | ![Mobile](docs/screenshots/mobile.png) |
-| CI passing | ![CI](docs/screenshots/ci.png) |
-| Cargo test output | ![Tests](docs/screenshots/tests.png) |
+| Create flow | <img width="1184" height="596" alt="image" src="https://github.com/user-attachments/assets/b39aa356-62c4-4d00-a14a-d21d736e8281" /> |
+| Claim ready | <img width="1163" height="735" alt="image" src="https://github.com/user-attachments/assets/c38f2f2f-9fd8-4f96-81a4-133165558f5d" /> |
+| Live event feed |<img width="820" height="417" alt="image" src="https://github.com/user-attachments/assets/ae10f19f-de38-4ea1-b263-fe67709f016b" /> |
+| Mobile view | <img width="390" height="715" alt="image" src="https://github.com/user-attachments/assets/fdef4c93-85a8-4dfb-8aed-eb5a10c303eb" /> |
+| Cargo test output | <img width="387" height="142" alt="image" src="https://github.com/user-attachments/assets/4d3c54d5-3254-4d5a-b47e-275143e2ea34" /> |
