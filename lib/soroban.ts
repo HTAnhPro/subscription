@@ -54,7 +54,7 @@ export async function invokeContract(opts: {
     networkPassphrase,
   })
     .addOperation(contract.call(opts.method, ...opts.args))
-    .setTimeout(30)
+    .setTimeout(180)
     .build();
 
   const sim = await sorobanRpc.simulateTransaction(tx);
@@ -66,9 +66,21 @@ export async function invokeContract(opts: {
   const signedXdr = await opts.signXdr(prepared.toXDR());
   const signed = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
 
+  if (typeof window !== "undefined") {
+    type AnyTx = { source: string; signatures: { hint: () => Uint8Array }[] };
+    const t = signed as unknown as AnyTx;
+    const hints = t.signatures.map((s) =>
+      Buffer.from(s.hint()).toString("hex"),
+    );
+    console.debug("[invokeContract] expected source:", opts.source);
+    console.debug("[invokeContract] envelope source:", t.source);
+    console.debug("[invokeContract] signature count:", t.signatures.length);
+    console.debug("[invokeContract] signature hints (last 4 bytes of pubkey):", hints);
+  }
+
   const sendRes = await sorobanRpc.sendTransaction(signed);
   if (sendRes.status === "ERROR") {
-    throw new Error(`send failed: ${JSON.stringify(sendRes.errorResult)}`);
+    throw new Error(describeSendError(sendRes));
   }
   const hash = sendRes.hash;
 
@@ -80,9 +92,134 @@ export async function invokeContract(opts: {
     tries++;
   }
   if (result.status === "FAILED") {
-    throw new Error("contract call failed on chain");
+    throw new Error(describeFailure(result, hash));
   }
   return { hash };
+}
+
+const TX_RESULT_CODES: Record<string, string> = {
+  txTooLate: "Transaction expired before it landed. The wallet held the signature past the timebound — try again.",
+  txTooEarly: "Transaction's minTime is in the future. Check your system clock.",
+  txBadAuth: "Signature didn't match the source account. Check that the connected wallet is the same as the form's subscriber/merchant address, and that the wallet is set to Stellar Testnet (not mainnet).",
+  txBadAuthExtra: "Extra signatures attached that weren't required.",
+  txBadSeq: "Sequence number mismatch. Reload and try again.",
+  txInsufficientFee: "Network fee was too low for current load. Try again.",
+  txInsufficientBalance: "Account balance can't cover this transaction's fee.",
+  txNoAccount: "Source account doesn't exist on the network. Fund it from friendbot.",
+  txInternalError: "Network internal error. Try again in a moment.",
+  txSorobanInvalid: "Soroban transaction was rejected as invalid.",
+  txMalformedNotEnoughTimeBounds: "Transaction is missing required Soroban timebounds.",
+};
+
+function describeSendError(res: rpc.Api.SendTransactionResponse): string {
+  const r = res as unknown as Record<string, unknown>;
+  const errorResult = r.errorResult as
+    | { result?: () => { switch?: () => { name?: string } } }
+    | undefined;
+  let codeName: string | undefined;
+  try {
+    codeName = errorResult?.result?.()?.switch?.()?.name;
+  } catch {
+    // ignore
+  }
+  if (codeName && TX_RESULT_CODES[codeName]) return TX_RESULT_CODES[codeName];
+  if (codeName) return `Send failed: ${codeName}`;
+  const errorXdr = r.errorResultXdr ?? r.errorResult;
+  let raw = "";
+  if (typeof errorXdr === "string") raw = errorXdr;
+  else if (errorXdr && typeof (errorXdr as { toXDR?: (f: string) => string }).toXDR === "function") {
+    try {
+      raw = (errorXdr as { toXDR: (f: string) => string }).toXDR("base64");
+    } catch {
+      // ignore
+    }
+  }
+  return raw ? `Send failed (raw): ${raw}` : "Send failed.";
+}
+
+function describeFailure(result: rpc.Api.GetTransactionResponse, hash: string): string {
+  const events = collectDiagnosticEvents(result as unknown as Record<string, unknown>);
+  for (const ev of events) {
+    const decoded = readDiagnosticError(ev);
+    if (decoded?.kind === "contract") {
+      return `Error(Contract, #${decoded.code}) on tx ${hash}`;
+    }
+    if (decoded?.kind === "host") {
+      const key = `${decoded.type}/${decoded.code}`;
+      const hint = HOST_ERROR_HINTS[key];
+      if (hint) return hint;
+    }
+  }
+  return `Tx ${hash} failed on chain. https://stellar.expert/explorer/testnet/tx/${hash}`;
+}
+
+const HOST_ERROR_HINTS: Record<string, string> = {
+  "sceAuth/scecInvalidAction":
+    "Authorization mismatch: the on-chain auth tree didn't match the actual call args. Refresh and try again.",
+  "sceAuth/scecExceededLimit": "Authorization tree exceeded the host's depth limit.",
+  "sceStorage/scecExceededLimit": "Contract ran out of ledger storage budget.",
+  "sceBudget/scecExceededLimit": "Contract exceeded its CPU/memory budget.",
+};
+
+type DiagError =
+  | { kind: "contract"; code: number }
+  | { kind: "host"; type: string; code: string };
+
+function readDiagnosticError(ev: xdr.DiagnosticEvent): DiagError | null {
+  try {
+    const body = ev.event().body().value() as { topics?: () => xdr.ScVal[]; data?: () => xdr.ScVal };
+    const candidates: xdr.ScVal[] = [];
+    if (typeof body?.topics === "function") candidates.push(...body.topics());
+    if (typeof body?.data === "function") {
+      const d = body.data();
+      if (d) candidates.push(d);
+    }
+    for (const c of candidates) {
+      if (c.switch().name !== "scvError") continue;
+      const err = c.error();
+      const k = err.switch().name;
+      if (k === "sceContract") return { kind: "contract", code: err.contractCode() };
+      const codeName = (err as unknown as { code?: () => { name: string } }).code?.()?.name ?? "";
+      return { kind: "host", type: k, code: codeName };
+    }
+  } catch {
+    // unparseable
+  }
+  return null;
+}
+
+function collectDiagnosticEvents(r: Record<string, unknown>): xdr.DiagnosticEvent[] {
+  const out: xdr.DiagnosticEvent[] = [];
+  const raw = r.diagnosticEventsXdr;
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      try {
+        if (typeof item === "string") {
+          out.push(xdr.DiagnosticEvent.fromXDR(item, "base64"));
+        } else if (item && typeof (item as xdr.DiagnosticEvent).event === "function") {
+          out.push(item as xdr.DiagnosticEvent);
+        }
+      } catch {
+        // skip malformed
+      }
+    }
+  }
+  try {
+    const meta = r.resultMetaXdr as xdr.TransactionMeta | undefined;
+    if (meta && typeof meta.switch === "function") {
+      const v = Number(meta.switch());
+      if (v === 3) {
+        const sorobanMeta = meta.v3().sorobanMeta();
+        out.push(...(sorobanMeta?.diagnosticEvents() ?? []));
+      } else if (v === 4) {
+        const v4 = (meta as unknown as { v4: () => { diagnosticEvents: () => xdr.DiagnosticEvent[] } }).v4();
+        out.push(...(v4.diagnosticEvents() ?? []));
+      }
+    }
+  } catch {
+    // older meta versions don't have soroban events
+  }
+  return out;
 }
 
 export async function readContract<T = unknown>(opts: {
